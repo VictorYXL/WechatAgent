@@ -1,0 +1,1 @@
+"""Local-first WeChat Copilot integration."""

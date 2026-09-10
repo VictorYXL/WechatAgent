@@ -1,0 +1,28 @@
+[project]
+name = "wechat-copilot-agent"
+version = "0.1.0"
+description = "Local-first WeChat assistant powered by GitHub Copilot SDK"
+requires-python = ">=3.11"
+dependencies = [
+	"github-copilot-sdk==1.0.13",
+	"httpx>=0.28,<1",
+	"cryptography>=46",
+	"qrcode[pil]>=8,<9",
+]
+
+[dependency-groups]
+dev = ["pytest>=9,<10"]
+
+[project.scripts]
+wechat-agent = "wechat_agent.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wechat_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
