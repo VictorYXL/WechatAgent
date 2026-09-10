@@ -134,6 +134,119 @@ def test_stop_only_signals_selected_profile(control):
         assert not second.stop_requested()
 
 
+def test_server_stop_signals_all_profiles_without_credentials(control):
+    data, login = control.profile_paths("default")
+    other_data, other_login = control.profile_paths("other")
+    with control.ServiceLease(data) as first, control.ServiceLease(other_data) as second:
+        first.publish()
+        second.publish()
+        assert control.control_legacy_accounts("stop") == 0
+        assert first.stop_requested()
+        assert second.stop_requested()
+
+
+def test_server_start_includes_all_saved_accounts_and_continues_after_failure(control, monkeypatch):
+    for name in ("default", "family", "last"):
+        data, login = control.profile_paths(name)
+        login.mkdir(parents=True)
+        (login / "credentials.json").write_text("{}")
+    control.profile_paths("unconfigured")[0].mkdir(parents=True)
+    start = Mock(side_effect=[OSError("synthetic"), 0, 0])
+    monkeypatch.setattr(control, "start_service", start)
+    assert control.control_legacy_accounts("start") == 1
+    assert [call.args for call in start.call_args_list] == [control.profile_paths(name) for name in ("default", "family", "last")]
+
+
+def test_server_start_without_accounts_does_not_spawn(control, monkeypatch):
+    start = Mock()
+    monkeypatch.setattr(control, "start_service", start)
+    assert control.control_legacy_accounts("start") == 1
+    start.assert_not_called()
+
+
+@pytest.mark.parametrize("action", ["start", "stop"])
+def test_server_commands_never_prompt_for_profile(control, monkeypatch, action):
+    monkeypatch.setattr(control.sys, "argv", ["control.py", action])
+    monkeypatch.setattr("builtins.input", Mock(side_effect=AssertionError("Unexpected prompt")))
+    server = Mock(return_value=0)
+    monkeypatch.setattr(control, "control_server", server)
+    assert control.main() == 0
+    server.assert_called_once_with(action)
+
+
+@pytest.mark.parametrize("action", ["start", "stop"])
+def test_server_commands_reject_profile_option(control, monkeypatch, action):
+    monkeypatch.setattr(control.sys, "argv", ["control.py", action, "--profile", "default"])
+    with pytest.raises(SystemExit) as error:
+        control.main()
+    assert error.value.code == 2
+
+
+def test_server_control_serializes_launchers(control, monkeypatch):
+    start = Mock()
+    monkeypatch.setattr(control, "start_service", start)
+    with control.ServiceLease(control.ROOT / "app/data/server-launcher"):
+        with pytest.raises(RuntimeError):
+            control.control_server("start")
+    start.assert_not_called()
+
+
+def test_login_command_still_selects_an_account(control, monkeypatch):
+    monkeypatch.setattr(control.sys, "argv", ["control.py", "login", "--terminal", "--profile", "family"])
+    login = AsyncMock(return_value=0)
+    monkeypatch.setattr(control, "login_user", login)
+    assert control.main() == 0
+    login.assert_awaited_once_with(*control.profile_paths("family"))
+
+
+def test_default_login_opens_authorized_browser_without_name_prompt(control, monkeypatch, capsys):
+    monkeypatch.setattr(control.sys, "argv", ["control.py", "login"])
+    monkeypatch.setattr("builtins.input", Mock(side_effect=AssertionError("Unexpected prompt")))
+    browser = Mock(return_value=True)
+    monkeypatch.setattr(control.webbrowser, "open", browser)
+    directory = control.ROOT / "app/data/server"
+    with control.ServiceLease(directory) as lease:
+        lease.publish()
+        (directory / "web.json").write_text(json.dumps({"port": 12345, "key": "a" * 43}))
+        assert control.main() == 0
+    browser.assert_called_once_with("http://127.0.0.1:12345/#key=" + "a" * 43, new=1)
+    assert "a" * 43 not in capsys.readouterr().out
+
+
+def test_server_starts_without_any_account_or_token(control, monkeypatch):
+    background = Mock(return_value=0)
+    monkeypatch.setattr(control, "start_background", background)
+    assert control.control_server("start") == 0
+    data, command, identifier = background.call_args.args
+    assert data == control.ROOT / "app/data/server"
+    assert command[1:3] == ["-m", "wechat_agent.server"]
+    assert identifier == command[-1]
+
+
+def test_server_stop_signals_manager(control):
+    directory = control.ROOT / "app/data/server"
+    with control.ServiceLease(directory) as lease:
+        lease.publish()
+        assert control.control_server("stop") == 0
+        assert lease.stop_requested()
+
+
+def test_default_login_reaches_qr_without_profile_prompt(control, monkeypatch):
+    monkeypatch.setattr(control.sys, "argv", ["control.py", "login", "--terminal"])
+    monkeypatch.setattr(control.os, "startfile", Mock(), raising=False)
+    data, login = control.profile_paths("default")
+    qr = AsyncMock(return_value={"ok": True, "qr_image": str(login / "scan/login.png")})
+    monkeypatch.setattr(control, "create_qr", qr)
+
+    def answer(prompt):
+        qr.assert_awaited_once_with(login / "scan", terminal=not control.WINDOWS)
+        assert prompt.startswith("After phone confirmation")
+        return "q"
+
+    monkeypatch.setattr("builtins.input", answer)
+    assert control.main() == 1
+
+
 def test_linux_start_detaches_and_redirects_output(control, monkeypatch):
     monkeypatch.setattr(control, "WINDOWS", False)
     data, login = control.profile_paths("default")

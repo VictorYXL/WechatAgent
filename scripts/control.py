@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
+import webbrowser
 
 from wechat_agent.runtime import ServiceLease, request_stop, service_running
 from wechat_agent.weixin import create_qr, finish_login, save_private_json
@@ -30,13 +31,81 @@ def profile_paths(name):
     return directory / "assistant", directory / "weixin"
 
 
-def choose_profile():
-    print("Profile: default = your existing account and saved tasks.")
-    profiles = ROOT / "app/data/profiles"
-    if profiles.exists():
-        print("Other saved profiles: " + ", ".join(sorted(path.name for path in profiles.iterdir() if path.is_dir())))
-    print("For a new independent account, enter a new profile name (e.g. family).")
-    return input("Profile name [default]: ").strip() or "default"
+def server_profiles():
+    profiles = [("default", *profile_paths("default"))]
+    directory = ROOT / "app/data/profiles"
+    if directory.exists():
+        for path in sorted(directory.iterdir()):
+            if not path.is_dir():
+                continue
+            try:
+                profile_paths(path.name)
+            except ValueError:
+                continue
+            if path.name.lower() == "default" or path.resolve().parent != directory.resolve():
+                continue
+            profiles.append((path.name, path / "assistant", path / "weixin"))
+    return profiles
+
+
+def control_legacy_accounts(action):
+    with ServiceLease(ROOT / "app/data/server-control"):
+        profiles = server_profiles()
+        if action == "start":
+            profiles = [(name, data, login) for name, data, login in profiles
+                        if (login / "credentials.json").is_file()]
+        if not profiles:
+            print("No saved WeChat accounts. Run login-wechat first, then start the server.")
+            return 1
+        failures = 0
+        print(f"Server {action}: applying to all {len(profiles)} account profile(s).")
+        for name, data, login in profiles:
+            print("Account profile: " + name)
+            try:
+                result = start_service(data, login) if action == "start" else stop_service(data)
+            except Exception as error:
+                print("Account operation failed. Error type: " + type(error).__name__)
+                result = 1
+            failures += bool(result)
+        print(f"Server {action} requests completed. Failed accounts: {failures}.")
+        return 1 if failures else 0
+
+
+def control_server(action):
+    directory = ROOT / "app/data/server"
+    with ServiceLease(ROOT / "app/data/server-launcher"):
+        if action == "stop":
+            result = request_stop(directory)
+            if result == "not_running":
+                return control_legacy_accounts("stop")
+            if result == "starting_retry":
+                print("Server is initializing. Please retry stop shortly.")
+                return 1
+            print("Server stop requested. All account connections will close; saved data is retained.")
+            return 0
+        if service_running(directory):
+            print("Server is already running. Run login-wechat to open the sign-in window.")
+            return 0
+        identifier = uuid.uuid4().hex
+        command = [BACKGROUND_PYTHON, "-m", "wechat_agent.server", "--root", str(ROOT), "--instance-id", identifier]
+        return start_background(directory, command, identifier)
+
+
+def open_login():
+    directory = ROOT / "app/data/server"
+    if not service_running(directory):
+        print("Server is not running. Run start-service first, then login-wechat.")
+        return 1
+    state = json.loads((directory / "web.json").read_text(encoding="utf-8"))
+    port = state["port"]
+    if not isinstance(port, int) or not 1 <= port <= 65535 or not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", state["key"]):
+        raise ValueError("Invalid local web state")
+    url = f"http://127.0.0.1:{port}/"
+    if webbrowser.open(url + "#key=" + state["key"], new=1):
+        print("WeChat sign-in opened in your browser. Server: " + url)
+        return 0
+    print("No browser is available. Use login-wechat --terminal, or an authenticated SSH tunnel.")
+    return 1
 
 
 def start_service(data, login):
@@ -47,11 +116,15 @@ def start_service(data, login):
         print("No saved WeChat login for this profile. Run the QR login script first.")
         return 1
     if not (ROOT / "token.txt").is_file():
-        print("GitHub token.txt is missing. Restore it locally; do not paste it into chat.")
+        print("GitHub token.txt is missing. Contact the administrator to restore it locally; do not paste it into chat.")
         return 1
     instance_id = uuid.uuid4().hex
     command = [BACKGROUND_PYTHON, "-m", "wechat_agent.cli", "serve", "--token-file", str(ROOT / "token.txt"),
                "--data-dir", str(data), "--login-dir", str(login), "--instance-id", instance_id]
+    return start_background(data, command, instance_id)
+
+
+def start_background(data, command, instance_id):
     data.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(data / "service.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     options = {"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {"start_new_session": True}
@@ -68,13 +141,15 @@ def start_service(data, login):
             print("Service started in the background. Log: " + str(data / "service.log"))
             if not WINDOWS:
                 print("You may disconnect SSH unless your server policy terminates user processes on logout.")
-            print("You may close this launcher and VS Code. Send the Chinese status command in WeChat to check connectivity.")
+            print("You may close this launcher and VS Code. Run login-wechat to sign in; no second start is needed.")
             return 0
         try:
             result = process.wait(timeout=0.2)
         except subprocess.TimeoutExpired:
             continue
-        print(f"Service exited during startup (exit code {result}). Check the service log and saved credentials.")
+        notice = f"Service exited during startup (exit code {result}). "
+        notice += "Contact the administrator to check the service log, WeChat login and GitHub Token validity."
+        print(notice)
         return 1
     print("Startup is not confirmed yet. Check the service log; do not repeatedly launch it.")
     return 1
@@ -114,7 +189,7 @@ def install_login(login, staged):
 
 async def login_user(data, login):
     if service_running(data):
-        print("Stop this profile's service before changing its login. Other profiles are unaffected.")
+        print("Run stop-service before changing an active account's login; it stops all server accounts.")
         return 1
     with ServiceLease(data):
         if (login / "credentials.json").exists():
@@ -152,7 +227,7 @@ async def login_user(data, login):
                     report = await finish_login(staged)
                     if report["ok"]:
                         if install_login(login, staged):
-                            print("Login saved successfully. Run the start script for this profile.")
+                            print("Login saved successfully. Run start-service to start all saved server accounts.")
                             return 0
                         return 1
                     print("Login not confirmed yet. If the QR expired, enter R to generate another.")
@@ -164,17 +239,22 @@ async def login_user(data, login):
 def main():
     parser = argparse.ArgumentParser(description="Local WeChat service and QR login scripts")
     parser.add_argument("action", choices=("start", "stop", "login"))
-    parser.add_argument("--profile", help="default or a separate local profile name")
+    parser.add_argument("--profile", help="terminal login only: default or a separate local account profile")
+    parser.add_argument("--terminal", action="store_true", help="use the legacy terminal QR login instead of a browser")
     arguments = parser.parse_args()
+    if arguments.action != "login" and (arguments.profile is not None or arguments.terminal):
+        parser.error("--profile and --terminal are only supported for login")
+    if arguments.profile is not None and not arguments.terminal:
+        parser.error("--profile requires --terminal; browser login identifies the account automatically")
     logging.disable(logging.CRITICAL)
     if not WINDOWS:
         os.umask(0o077)
     try:
-        data, login = profile_paths(arguments.profile or choose_profile())
-        if arguments.action == "start":
-            return start_service(data, login)
-        if arguments.action == "stop":
-            return stop_service(data)
+        if arguments.action in ("start", "stop"):
+            return control_server(arguments.action)
+        if not arguments.terminal:
+            return open_login()
+        data, login = profile_paths(arguments.profile or "default")
         return asyncio.run(login_user(data, login))
     except (KeyboardInterrupt, EOFError):
         print("Cancelled.")

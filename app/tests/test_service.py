@@ -10,6 +10,51 @@ def incoming(number, text, user="owner"):
             "item_list": [{"type": 1, "text_item": {"text": text}}]}
 
 
+def test_copilot_failures_request_administrator_without_leaking_details(tmp_path):
+    async def scenario():
+        store = Store(tmp_path)
+        agent = AsyncMock()
+        agent.model = "test-model"
+        agent.handle.side_effect = RuntimeError("token expired: synthetic-secret")
+        agent.available_models.side_effect = RuntimeError("unauthorized: synthetic-secret")
+        service = Service(store, AsyncMock(), {"bot_id": "bot", "user_id": "owner"}, agent)
+        user = store.user("bot", "owner")
+        try:
+            await service.receive(incoming(1, "work"))
+            await service.process_user(user)
+            await service.receive(incoming(2, "模型"))
+            replies = [item["content"] for item in store.pending_deliveries()]
+            assert len(replies) == 2
+            assert all("请联系管理员" in reply and "GitHub Token" in reply for reply in replies)
+            assert all("synthetic-secret" not in reply for reply in replies)
+        finally:
+            store.close()
+    asyncio.run(scenario())
+
+
+def test_wechat_poll_failure_logs_administrator_hint(tmp_path, monkeypatch, capsys):
+    async def scenario():
+        store = Store(tmp_path)
+        weixin = AsyncMock()
+        service = Service(store, weixin, {"bot_id": "bot", "user_id": "owner"}, AsyncMock())
+
+        async def rejected(cursor):
+            service.shutdown.set()
+            raise RuntimeError("expired: synthetic-secret")
+
+        weixin.updates.side_effect = rejected
+        monkeypatch.setattr("wechat_agent.service.asyncio.sleep", AsyncMock())
+        try:
+            await service.poll_loop()
+            output = capsys.readouterr().out
+            assert "Contact the administrator" in output
+            assert "scan again" in output
+            assert "synthetic-secret" not in output
+        finally:
+            store.close()
+    asyncio.run(scenario())
+
+
 def test_file_listing_format_size_and_local_time():
     from datetime import datetime, timezone
 

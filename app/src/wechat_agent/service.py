@@ -317,7 +317,8 @@ class Service:
             try:
                 available = await asyncio.wait_for(self.agent.available_models(user_id), timeout=30)
             except Exception as error:
-                reply = f"暂时无法获取可用模型，模型设置未改变。错误类型：{type(error).__name__}"
+                reply = ("暂时无法获取可用模型，模型设置未改变。请联系管理员检查 GitHub Token 是否过期、"
+                         f"Copilot 授权及服务连接。错误类型：{type(error).__name__}")
             else:
                 known = json.loads(self.store.setting("model_numbers:" + user_id, "[]"))
                 for model_id in sorted(set(available)):
@@ -420,7 +421,8 @@ class Service:
             except Exception as error:
                 self.store.mark_message(message["id"], "failed", type(error).__name__)
                 self.store.enqueue(user_id, message["id"], "text",
-                                   "本次处理未完成，资料已保留。请说明是否继续。错误类型：" + type(error).__name__)
+                                   "本次处理未完成，资料已保留。请联系管理员检查 GitHub Token 是否过期、"
+                                   "Copilot 授权及服务连接，恢复后再继续。错误类型：" + type(error).__name__)
             finally:
                 self.running.pop(user_id, None)
                 if heartbeat:
@@ -480,8 +482,12 @@ class Service:
             except WeixinError as error:
                 status = "waiting_context" if "-14" in str(error) else "failed"
                 self.store.mark_delivery(delivery["id"], status, type(error).__name__)
+                print("WeChat delivery rejected. Contact the administrator to check WeChat login expiry, "
+                      "reply context and account permissions. Error type:", type(error).__name__, flush=True)
             except Exception as error:
                 self.store.mark_delivery(delivery["id"], "failed", type(error).__name__)
+                print("WeChat delivery failed. Contact the administrator to check WeChat login expiry "
+                      "and service connectivity. Error type:", type(error).__name__, flush=True)
 
     async def poll_loop(self):
         while not self.shutdown.is_set():
@@ -495,7 +501,9 @@ class Service:
                 if not response.get("msgs"):
                     await asyncio.sleep(1)
             except Exception as error:
-                print("Weixin polling error:", type(error).__name__, flush=True)
+                print("WeChat receiving failed. Contact the administrator to check WeChat login expiry "
+                      "and service connectivity. If login has expired, stop the service and scan again. "
+                      "WeChat notifications may be unavailable. Error type:", type(error).__name__, flush=True)
                 await asyncio.sleep(5)
 
     async def delivery_loop(self):

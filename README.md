@@ -40,19 +40,12 @@ them to check persistence. It has no filesystem or shell tools.
 
 ## WeChat Login
 
-```powershell
-uv run --project app wechat-agent weixin-qr
-```
-
-Open `app/data/weixin/login.png` locally, scan with WeChat, and confirm on the phone.
-Then run:
-
-```powershell
-uv run --project app wechat-agent weixin-confirm
-```
-
-If expired, generate a new QR code. Confirm is a single status request, not a daemon.
-Successful login saves local credentials and removes the QR and pending login data.
+Start the server first, then run the login launcher to open a private browser window.
+Scan the QR code with WeChat and confirm on your phone. The page checks confirmation
+automatically; the server saves the account and connects it without another start command.
+No account name or profile selection is required. Refresh expired QR codes with **New QR code**.
+Closing the browser does not stop the server. If you close it before confirmation has been
+processed, reopen the login launcher and scan again. Cancel discards the pending login.
 The adapter connects directly to WeChat iLink HTTPS endpoints, without CowAgent
 hosting, a public callback server, client hooks, or a third-party model proxy.
 Account eligibility and platform message restrictions still apply.
@@ -65,22 +58,21 @@ Double-click these scripts in the project root; VS Code is not required:
 
 | Script | Purpose |
 | --- | --- |
-| [start-service.cmd](start-service.cmd) | Reuse saved credentials and start a detached background process; reject duplicate instances. |
-| [stop-service.cmd](stop-service.cmd) | Request cleanup and exit for this profile, retaining login and data. |
-| [login-wechat.cmd](login-wechat.cmd) | First login or renewal; open the QR image, then press Enter after confirming on the phone. |
+| [start-service.cmd](start-service.cmd) | Start the persistent server, even with no logged-in accounts. |
+| [stop-service.cmd](stop-service.cmd) | Stop the server and all account connections, retaining login and data. |
+| [login-wechat.cmd](login-wechat.cmd) | Open the browser QR sign-in window; automatically connect after confirmation. |
 
 After startup succeeds, the launcher window and VS Code can be closed. The service has
-no console window: its input is disconnected and output goes to the profile's
-`service.log` (default: `app/data/assistant/service.log`). Use `stop-service.cmd` to stop it.
-This replaces the previous console-bound startup; an already-running old instance must
-be stopped and started once to use the new behavior. Login remains interactive until
-the QR confirmation is complete.
-The scripts require uv and the project dependencies. To skip the profile prompt:
+no console window: its input is disconnected and account/server diagnostics go to
+`app/data/server/service.log`. Use `stop-service.cmd` to stop it.
+Stop old standalone instances once before migrating to the persistent server.
+The scripts require uv and the project dependencies. Start and stop control the entire
+project instance; neither asks for a profile:
 
 ```powershell
-.\start-service.cmd --profile default
-.\stop-service.cmd --profile default
-.\login-wechat.cmd --profile family
+.\start-service.cmd
+.\login-wechat.cmd
+.\stop-service.cmd
 ```
 
 ### Linux Scripts
@@ -96,55 +88,73 @@ chmod 600 token.txt
 uv sync --locked --project app
 uv run --project app python -m copilot download-runtime
 uv run --project app pytest app/tests -q
-sh login-wechat.sh --profile default
-sh start-service.sh --profile default
-sh stop-service.sh --profile default
+sh start-service.sh
+sh login-wechat.sh
+sh stop-service.sh
 ```
 
 The three scripts can be called from any working directory. Using `sh` avoids requiring
 executable file permissions; alternatively, use `chmod +x start-service.sh stop-service.sh
 login-wechat.sh` and invoke them with `./`. Shell scripts use LF line endings.
 
-Linux login renders the QR code in the terminal using the QR library, so a graphical
-desktop is not required. Use a wide terminal on another screen and scan with the phone.
+Linux with a desktop opens the same browser login. On a headless server, use
+`sh login-wechat.sh --terminal` after starting the server. For a separate account in this
+terminal-only fallback, add `--profile family`. The default is the original account.
+The fallback renders the QR code in the terminal. Use a wide terminal on another screen.
 If rendering is unsuitable, retrieve the temporary `login.png` over authenticated SSH/SFTP
 and open it locally. Do not host it on a public web server or publish it in logs. Press
 Enter after phone confirmation; use `R` for a new QR or `Q` to cancel.
 
 Linux startup creates a detached process with standard input disconnected and output
-appended to `<data-directory>/service.log` (default: `app/data/assistant/service.log`).
+appended to `app/data/server/service.log`.
 New files are private to the current OS user through umask 077. Existing files keep their
 current permissions; restrict migrated data and credentials separately. Treat logs as
 private and monitor their size; automatic log rotation is not included.
 
 The process normally survives SSH disconnects, but server policies can terminate user
-processes on logout. These scripts do not configure systemd, boot startup, or crash
-restarts. For unattended hosting, configure a service manager under the dedicated user
-and run the foreground `wechat-agent serve` command, not the detached start script.
+processes on logout. These scripts do not configure systemd or boot startup. For unattended
+hosting, configure a service manager under the dedicated user and run
+`uv run --project app python -m wechat_agent.server --root /absolute/project/path`
+in the foreground, not the detached start script.
 No root privileges or automatic system configuration are requested by these scripts.
 
 On both platforms this is detached execution, not a tmux-style reattachable terminal.
 Follow the private log for output. Closing a launcher or terminal normally leaves the
 service running, but shutdown, sleep, OS logout policies, administrative process cleanup,
-or process failure can still interrupt it. There is no automatic crash restart or boot
-startup; use a service manager when those guarantees are required.
+or process failure can still interrupt it. The server retries failed account workers after
+60 seconds; it cannot restart itself after a crash. Use an OS service manager for that.
 
 ### Profiles and Login Renewal
 
-All launchers accept `--profile`; otherwise they ask `Profile name [default]`. Press Enter
-to reuse the existing default account and data. Use a separate name such as `family` for
-another bot login, and use that same name for start, stop, and login. Named profiles live
-under `app/data/profiles/<name>/`. This does not add contacts to an existing bot's allowlist.
-Profiles share the project-root GitHub token by default; review multi-user licensing.
+Start and stop are server-wide commands for this project instance, not per-user commands.
+The persistent manager remains alive with no accounts, discovers saved logins every half
+second and runs isolated account workers as asynchronous tasks. Existing per-account data
+and Copilot sessions are preserved. Other project copies and custom data directories are
+outside its scope. `--profile` is rejected for start and stop.
 
-Stop the selected profile before renewing its login. With existing credentials, choose
-`1` to retain them or `2` to scan again. New credentials replace the old ones only after
-successful confirmation. Renewal of the same account preserves the allowlist; switching
-accounts requires typing `REPLACE`. Old data is retained but is not exposed to a different
-account. Prefer a new profile instead of overwriting another account's login.
+Browser login identifies the account from the confirmed WeChat bot/user identity. The first
+account uses the default paths; additional accounts get automatically named directories
+under `app/data/profiles/`. Signing into an existing account renews that account's credentials
+and preserves its allowlist. Its current work is interrupted while reconnecting; other
+accounts continue. Failed or cancelled scans leave saved credentials unchanged. This does
+not add contacts to an existing bot's allowlist. Accounts share the project-root GitHub token;
+review multi-user licensing. Signing in does not prove Copilot entitlement or Token validity.
+
+The legacy `--terminal` login still offers reuse or rescan and supports `--profile`. Stop
+the server before renewing an active account with that fallback, then start it again.
+The browser flow supports renewal while the server is running.
+
+The login page binds only to `127.0.0.1` on an available port. The launcher reads a private
+capability from `app/data/server/web.json` and passes it in a URL fragment; the page removes
+the fragment and holds it in tab-local session storage. APIs require that capability and
+reject foreign Host/Origin headers. QR sessions expire after ten minutes; abandoned scan
+files are removed on the next login request, server restart or shutdown. GitHub and WeChat
+tokens never go to the browser. Treat the capability and QR images as private credentials.
+Do not expose this local HTTP service through a public proxy. Remote browser access needs
+an authenticated SSH tunnel and private capability transfer; there is no public login portal.
 
 Retaining credentials is not an online validity check; expired credentials require a new
-scan. Stop submits an exit request, not proof of completed cleanup. Active work is
+scan. Stop submits exit requests for all accounts, not proof of completed cleanup. Active work is
 interrupted, completed actions are not undone, queued requests remain saved, and detached
 task subprocesses are not guaranteed to stop. No launcher changes sleep or execution policy.
 
@@ -155,8 +165,9 @@ respective services. The server must reach WeChat iLink and its media CDN over H
 GitHub/Copilot authentication and inference services, and runtime/package download hosts
 during setup. DNS, certificates, firewall/proxy rules and regional availability must allow
 those connections; merely having an Internet connection does not guarantee reachability.
-The bot uses long polling, not an inbound webhook, so it needs no public domain, inbound
-HTTP port, router port forwarding, or phone-to-server connection. SSH is only for server
+The bot uses long polling, not an inbound webhook, so it needs no public domain, public
+HTTP port, router port forwarding, or phone-to-server connection. The login window uses
+a local-only HTTP listener. SSH is only for server
 administration and is not required by the bot protocol. The server must remain powered,
 awake and connected for messages and tasks to be processed.
 
@@ -175,17 +186,28 @@ uv run --project app wechat-agent serve --token-file token.txt
 uv run --project app wechat-agent stop --data-dir app/data/assistant
 ```
 
+These low-level CLI commands operate on a single data directory (the default account
+unless overridden), unlike the server-wide start/stop launchers above.
 Keep this process and the computer running. Use Ctrl+C to stop. Run only one service
 instance for a given data directory; a process lock prevents duplicate instances.
 The stop command requests cleanup of that instance without killing unrelated processes.
-There is no public web interface or listening
-HTTP port. Initially only the user bound during QR login is accepted.
+There is no public web interface. The manager's browser login listens only on loopback.
+Initially only the user bound during QR login is accepted.
 
 ```powershell
 uv run --project app wechat-agent status
 ```
 
 Status shows counts and error types only, not message contents or credentials.
+
+Copilot request and model-list failures tell the WeChat user to contact the administrator
+to check GitHub Token expiry, Copilot authorization and connectivity. These messages do
+not claim every failure is an expired token and never include raw exception details.
+WeChat receive/delivery failures write administrator guidance to the private server log
+(or the account log for legacy standalone workers). An expired WeChat login may prevent both receiving and sending messages,
+so an in-chat expiry notification cannot be guaranteed. The administrator must monitor
+the log and scan again through the login launcher when required. Replacing the GitHub token also
+requires a service restart; there is no proactive expiry monitor or external alert channel.
 
 ## Interaction
 
