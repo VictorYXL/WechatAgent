@@ -211,6 +211,16 @@ requires a service restart; there is no proactive expiry monitor or external ale
 
 ## Interaction
 
+- Both agent roles can query the read-only `get_capabilities` tool for the application's
+  delivery, execution and permission boundaries. Normal text replies are already queued
+  to the current WeChat conversation; asking for a message to yourself now does not require
+  desktop control or a separate messaging integration. File/script work is delegated to
+  the task worker rather than rejected merely because the reception agent has no shell.
+  Task selection binds the current request immediately, even if the reception response
+  later fails. Timers, arbitrary WeChat recipients, browser automation, MCP and Skills
+  remain unavailable. Authorization never creates a missing integration or overrides
+  workspace restrictions. Prompt guidance improves routing but is not a guarantee of
+  model behavior or proof of message delivery.
 - Incoming ordinary text queues a receipt marked `[对话 · 排队中]` only when earlier work
   exists for that user, a worker is active, or the queue is paused. Idle requests skip
   the queued notice. Explicit task continuation follows the same rule and uses its task number. Processing emits
