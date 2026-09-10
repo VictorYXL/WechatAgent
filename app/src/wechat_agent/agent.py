@@ -178,7 +178,10 @@ class Agent:
                 finally:
                     await session.disconnect()
                 if response and response.data.content:
-                    self.store.enqueue(user_id, message_id, "text", response.data.content)
+                    if selected:
+                        self.store.bind_task(user_id, message_id, selected["id"])
+                    self.store.enqueue_text(user_id, message_id, response.data.content,
+                                            state="处理中" if selected else "已完成")
             if selected:
                 await self.execute(user_id, message, selected, manifest, model=model)
         finally:
@@ -187,6 +190,7 @@ class Agent:
     async def execute(self, user_id, message, task, manifest, *, model=None):
         model = model or self.current_model(user_id)
         self.store.bind_task(user_id, message["id"], task["id"])
+        self.store.enqueue_text(user_id, message["id"], task["title"][:120], state="处理中")
         workspace = self.store.user_root(user_id) / "workspace"
         last_progress = 0.0
 
@@ -226,7 +230,7 @@ class Agent:
             if now - last_progress < 20:
                 return {"sent": False, "reason": "rate_limited"}
             last_progress = now
-            self.store.enqueue(user_id, message["id"], "text", f"[任务 {task['number']} · {task['title'][:32]}] {arguments['message'][:400]}")
+            self.store.enqueue_text(user_id, message["id"], arguments["message"][:400], state="处理中")
             return {"queued": True}
 
         def update_summary(arguments):
@@ -273,6 +277,6 @@ class Agent:
             finally:
                 await session.disconnect()
             if response and response.data.content:
-                self.store.enqueue(user_id, message["id"], "text", f"[任务 {task['number']} · {task['title'][:32]}]\n{response.data.content}")
+                self.store.enqueue_text(user_id, message["id"], response.data.content, state="已完成")
                 if not self.store.get_task(user_id, task["id"])["summary"]:
                     self.store.summarize_task(user_id, task["id"], response.data.content[:2000])

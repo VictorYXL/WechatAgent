@@ -28,7 +28,7 @@ def file_listing_entry(item):
     except (TypeError, ValueError):
         time_text = "时间未知"
     kind = "收到" if item["source"] == "original" else "生成"
-    return f"{item['number']} [{kind}，{size_text}，{time_text}] {item['name']}"
+    return f"[文件 {item['number']} · {kind}，{size_text}，{time_text}] {item['name']}"
 
 
 def parse_command(text: str):
@@ -93,10 +93,10 @@ class Service:
             ).lastrowid
         self.questions[user_id] = future
         self.confirmations[user_id] = {"number": number, "approval": approval}
-        prompt = f"确认 {number}\n{question}\n回复：同意 {number} 或 拒绝 {number}"
+        prompt = f"[确认 {number} · 等待确认] {question}\n回复：同意 {number} 或 拒绝 {number}"
         if not approval:
             prompt += "\n需要补充信息时，也可直接回复文字。"
-        self.store.enqueue(user_id, message_id, "text", prompt)
+        self.store.enqueue_text(user_id, message_id, prompt, state="等待确认")
         try:
             return await asyncio.wait_for(future, timeout=300)
         finally:
@@ -133,7 +133,7 @@ class Service:
             confirmation = self.confirmations[user_id]
             if confirmation["approval"]:
                 number = confirmation["number"]
-                self.store.enqueue(user_id, message_id, "text", f"当前等待操作确认，请发送 同意 {number} 或 拒绝 {number}。")
+                self.store.enqueue_text(user_id, message_id, f"当前等待操作确认，请发送 同意 {number} 或 拒绝 {number}。")
             else:
                 self.questions[user_id].set_result(text)
                 with self.store.db:
@@ -141,13 +141,27 @@ class Service:
             if media_items(raw):
                 await self.download_attachments(user_id, message_id, raw)
             self.store.mark_message(message_id, "done")
+            return
+        if text and self.request_must_wait(user_id, message_id) and not self.store.db.execute("SELECT 1 FROM outbox WHERE user_id=? AND message_id=? LIMIT 1",
+                                               (user_id, message_id)).fetchone():
+            paused = self.store.setting("queue_paused:" + user_id) == "1"
+            self.store.enqueue_text(user_id, message_id,
+                                    "已收到消息，正在排队。队列已暂停，恢复后开始处理。" if paused else
+                                    "已收到消息，正在排队，轮到后开始处理。", state="排队中")
+
+    def request_must_wait(self, user_id, message_id):
+        return (self.store.setting("queue_paused:" + user_id) == "1"
+                or self.files_busy(user_id)
+                or self.store.db.execute("SELECT 1 FROM messages WHERE user_id=? AND id<? "
+                                         "AND status IN ('pending','processing','cancelled_media') LIMIT 1",
+                                         (user_id, message_id)).fetchone() is not None)
 
     def task_status(self, user_id, task):
         state = self.store.task_state(user_id, task["id"])
-        return {"pending": "排队中", "processing": "执行中", "done": "本轮处理结束",
-                "failed": "失败", "interrupted": "已中断", "cancelled": "已取消",
-                "cancelled_media": "已取消，资料待保存",
-                "unknown": "历史任务，执行状态未记录"}.get(state, state)
+        return {"pending": "排队中", "processing": "处理中", "done": "已完成", "waiting": "等待确认",
+            "failed": "失败", "interrupted": "已停止", "cancelled": "已停止",
+            "cancelled_media": "已停止",
+            "unknown": "状态未知"}.get(state, "状态未知")
 
     def cancel_queued(self, user_id, through_message):
         for message in self.store.pending(user_id):
@@ -219,21 +233,21 @@ class Service:
                 elapsed = int(time.monotonic() - running["started"])
                 reply += f"\n已运行：{elapsed // 60} 分 {elapsed % 60} 秒"
                 reply += f"\n本轮模型：{running['model']}"
-                reply += f"\n当前任务：{task['number']} {task['title'][:80]}" if task else "\n阶段：接收资料或分析请求"
+                reply += f"\n[任务 {task['number']} · {self.task_status(user_id, task)}] {task['title'][:80]}" if task else "\n阶段：接收资料或分析请求"
                 recent = self.store.db.execute("SELECT created_at FROM outbox WHERE message_id=? ORDER BY rowid DESC LIMIT 1",
                                                (running["message_id"],)).fetchone()
                 if recent:
                     reply += f"\n最近通知时间（UTC）：{recent[0]}"
             if user_id in self.confirmations:
-                reply += f"\n等待确认：{self.confirmations[user_id]['number']}"
+                reply += f"\n[确认 {self.confirmations[user_id]['number']} · 等待确认] 请回复对应编号。"
             deletion = self.store.db.execute("SELECT number FROM confirmations JOIN file_deletions USING(number) "
                                              "WHERE user_id=? AND status='pending' AND expires_at>datetime('now')", (user_id,)).fetchone()
             if deletion:
-                reply += f"\n等待删除确认：{deletion[0]}"
+                reply += f"\n[确认 {deletion[0]} · 等待确认] 删除文件"
         elif action == "tasks":
             tasks = self.store.find_tasks(user_id)
             reply = "最近任务（最多 20 项）：\n" + "\n".join(
-                f"{task['number']} · {task['title'][:80]} · {self.task_status(user_id, task)}" for task in tasks
+                f"[任务 {task['number']} · {self.task_status(user_id, task)}] {task['title'][:80]}" for task in tasks
             ) if tasks else "暂无任务记录。"
             if tasks:
                 reply += "\n发送 任务 编号 查看详情，或 继续任务 编号 追加要求。"
@@ -247,12 +261,14 @@ class Service:
                     if self.store.task_for_message(user_id, message_id):
                         return True
                     self.store.bind_task(user_id, message_id, task["id"])
+                    if not self.request_must_wait(user_id, message_id):
+                        return True
                     paused = self.store.setting("queue_paused:" + user_id) == "1"
                     reply = f"已排队继续任务 {number}：{task['title'][:80]}。"
                     reply += "队列已暂停，发送 恢复队列 后执行。" if paused else "将基于已有上下文和成果继续，不撤销已完成操作。"
-                    self.store.enqueue(user_id, message_id, "text", reply)
+                    self.store.enqueue_text(user_id, message_id, reply, state="排队中")
                     return True
-                reply = (f"任务 {number}：{task['title'][:120]}\n状态：{self.task_status(user_id, task)}"
+                reply = (f"[任务 {number} · {self.task_status(user_id, task)}] {task['title'][:120]}"
                          f"\n更新时间（UTC）：{task['updated_at']}\n摘要：{task['summary'][:1600] or '暂无摘要'}"
                          f"\n继续处理：继续任务 {number} 你的要求")
         elif action == "files":
@@ -284,8 +300,8 @@ class Service:
                                                                  (user_id, message_id)).lastrowid
                             self.store.db.execute("INSERT INTO file_deletions VALUES (?,?,datetime('now','+5 minutes'))",
                                                   (confirmation, json.dumps(numbers)))
-                        listing = "\n".join(f"{record['number']} · {record['name']}" for record in records[:10])
-                        reply = (f"确认 {confirmation}：将删除文件库中的 {len(records)} 个文件（以下最多显示 10 项）。\n{listing}\n"
+                        listing = "\n".join(f"[文件 {record['number']} · 待删除] {record['name']}" for record in records[:10])
+                        reply = (f"[确认 {confirmation} · 等待确认] 将删除文件库中的 {len(records)} 个文件（以下最多显示 10 项）。\n{listing}\n"
                                  "范围：原始上传文件及上传工作副本、已登记输出/发送副本。生成源文件和其他任务工作区文件保留。\n"
                                  "不删除登录、任务历史，也不能撤回微信中已收到的文件。删除不可撤销，可能影响旧任务继续处理。\n"
                                  f"五分钟内发送 同意 {confirmation} 执行，或 拒绝 {confirmation} 取消。之后新收到的文件不受影响。")
@@ -300,7 +316,11 @@ class Service:
         elif action in ("approve", "reject"):
             deletion_reply = self.confirm_file_deletion(user_id, number, action == "approve")
             if deletion_reply is not None:
-                self.store.enqueue(user_id, message_id, "text", deletion_reply)
+                status = self.store.db.execute("SELECT status FROM confirmations WHERE number=? AND user_id=?",
+                                               (number, user_id)).fetchone()[0]
+                label = {"approved": "已完成", "rejected": "已拒绝", "partial": "部分失败",
+                         "blocked": "未执行", "expired": "已失效"}.get(status, "已失效")
+                self.store.enqueue_text(user_id, message_id, f"[确认 {number} · {label}] {deletion_reply}")
                 self.store.mark_message(message_id, "done")
                 return True
             confirmation = self.confirmations.get(user_id)
@@ -312,7 +332,7 @@ class Service:
                     self.store.db.execute("UPDATE confirmations SET status=? WHERE number=? AND user_id=?",
                                           ("approved" if action == "approve" else "rejected", number, user_id))
                 future.set_result("YES" if action == "approve" else "NO")
-                reply = f"确认 {number} 已{'同意' if action == 'approve' else '拒绝'}。"
+                reply = f"[确认 {number} · {'已同意' if action == 'approve' else '已拒绝'}] 已记录你的选择。"
         elif action in ("models", "switch_model"):
             try:
                 available = await asyncio.wait_for(self.agent.available_models(user_id), timeout=30)
@@ -341,8 +361,8 @@ class Service:
                             labels.append("正在使用")
                         if model_id == current:
                             labels.append("后续请求" if running else "当前使用")
-                        marker = f"（{'，'.join(labels)}）" if labels else ""
-                        entries.append(f"{index} · {model_id}{marker}")
+                        marker = "，".join(labels) if labels else "可用"
+                        entries.append(f"[模型 {index} · {marker}] {model_id}")
                     reply += "\n可用模型：\n" + "\n".join(entries) if entries else "\n当前账号未返回可用模型，设置未改变。"
                     reply += "\n发送 切换模型 编号，填写列表中的实际编号；也可填写完整模型ID。切换不打断当前执行。"
                 else:
@@ -354,7 +374,8 @@ class Service:
                         reply = "该模型编号或 ID 当前不可用，设置未改变。请发送 模型 查看列表。"
                     else:
                         self.store.set_setting("model:" + user_id, selected)
-                        reply = f"后续请求已切换为 {selected}。当前执行不受影响，其他用户的设置不变。"
+                        reply = (f"[模型 {known.index(selected) + 1} · 后续请求] {selected}\n"
+                                 "后续请求已切换，当前执行不受影响，其他用户的设置不变。")
         elif action == "help":
             reply = ("状态：查看当前执行和队列\n任务：列出任务\n任务 编号：查看任务详情\n"
                      "文件：列出文件\n文件 编号：获取文件\n继续任务 编号：继续已有任务\n"
@@ -365,7 +386,7 @@ class Service:
                      "同意 编号 / 拒绝 编号：回答对应确认请求\n请将“编号”替换为列表或确认消息中的实际数字。")
         else:
             return False
-        self.store.enqueue(user_id, message_id, "text", reply)
+        self.store.enqueue_text(user_id, message_id, reply)
         self.store.mark_message(message_id, "done")
         return True
 
@@ -398,7 +419,7 @@ class Service:
                         self.cancel_queued(user_id, message["id"])
                     self.store.mark_message(message["id"], "done")
                     await self.download_attachments(user_id, message["id"], json.loads(message["payload"]))
-                    self.store.enqueue(user_id, message["id"], "text", "已处理停止请求；重启前的执行不会自动重放。")
+                    self.store.enqueue_text(user_id, message["id"], "已处理停止请求；重启前的执行不会自动重放。")
                     continue
                 if await self.control(user_id, message["id"], command):
                     await self.download_attachments(user_id, message["id"], json.loads(message["payload"]))
@@ -410,6 +431,8 @@ class Service:
                                      "model": self.store.setting("model:" + user_id, self.agent.model)}
             heartbeat = None
             try:
+                if message["text"] and not cancelled_media:
+                    self.store.enqueue_text(user_id, message["id"], "收到请求，开始处理。", state="处理中")
                 await self.download_attachments(user_id, message["id"], json.loads(message["payload"]))
                 if message["text"] and not cancelled_media:
                     heartbeat = asyncio.create_task(self.task_heartbeat(user_id, message["id"]))
@@ -417,12 +440,14 @@ class Service:
                 self.store.mark_message(message["id"], "cancelled" if cancelled_media else "done")
             except asyncio.CancelledError:
                 self.store.mark_message(message["id"], "cancelled_media" if cancelled_media else "interrupted")
+                if message["text"] and not cancelled_media:
+                    self.store.enqueue_text(user_id, message["id"], "本轮处理已停止，已完成的操作不会撤销。", state="已停止")
                 raise
             except Exception as error:
                 self.store.mark_message(message["id"], "failed", type(error).__name__)
-                self.store.enqueue(user_id, message["id"], "text",
+                self.store.enqueue_text(user_id, message["id"],
                                    "本次处理未完成，资料已保留。请联系管理员检查 GitHub Token 是否过期、"
-                                   "Copilot 授权及服务连接，恢复后再继续。错误类型：" + type(error).__name__)
+                                   "Copilot 授权及服务连接，恢复后再继续。错误类型：" + type(error).__name__, state="失败")
             finally:
                 self.running.pop(user_id, None)
                 if heartbeat:
@@ -437,8 +462,11 @@ class Service:
                 "AND created_at>=datetime('now','-55 seconds') LIMIT 1", (user_id, message_id)
             ).fetchone()
             if not recent:
-                self.store.enqueue(user_id, message_id, "text",
-                                   "任务仍在运行，暂未完成。你可以发送 状态 查看状态，或 停止 结束当前执行。")
+                waiting = user_id in self.questions and not self.questions[user_id].done()
+                self.store.enqueue_text(user_id, message_id,
+                                        "正在等待你的确认或补充信息。" if waiting else
+                                        "任务仍在运行，暂未完成。你可以发送 状态 查看状态，或 停止 结束当前执行。",
+                                        state="等待确认" if waiting else "处理中")
 
     def start_pending_workers(self):
         users = self.store.db.execute("SELECT DISTINCT user_id FROM messages WHERE status IN ('pending','cancelled_media')").fetchall()

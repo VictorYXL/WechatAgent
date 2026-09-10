@@ -10,6 +10,158 @@ def incoming(number, text, user="owner"):
             "item_list": [{"type": 1, "text_item": {"text": text}}]}
 
 
+def test_reply_headers_split_and_do_not_inherit_other_tasks(tmp_path):
+    store = Store(tmp_path)
+    try:
+        user = store.user("bot", "owner")
+        other = store.user("bot", "other")
+        message = store.ingest(user, "work", "work", {})
+        task = store.create_task(user, "Report")
+        store.bind_task(user, message, task["id"])
+        content = "result" * 1200
+        store.enqueue_text(user, message, content, state="已完成")
+        replies = store.pending_deliveries()
+        prefix = f"[任务 {task['number']} · 已完成]\n"
+        assert len(replies) > 1
+        assert all(item["content"].startswith(prefix) and len(item["content"]) <= 3000 for item in replies)
+        assert "".join(item["content"][len(prefix):] for item in replies) == content
+        store.enqueue_text(other, message, "hello", state="已完成")
+        assert store.pending_deliveries()[-1]["content"] == "[对话 · 已完成]\nhello"
+        store.enqueue_text(user, message, "help")
+        assert store.pending_deliveries()[-1]["content"] == "[系统]\nhelp"
+    finally:
+        store.close()
+
+
+def test_receipt_is_immediate_deduplicated_and_survives_restart(tmp_path):
+    async def scenario():
+        store = Store(tmp_path)
+        agent = AsyncMock()
+        service = Service(store, AsyncMock(), {"bot_id": "bot", "user_id": "owner"}, agent)
+        user = store.user("bot", "owner")
+        store.set_setting("queue_paused:" + user, "1")
+        raw = incoming(1, "work")
+        try:
+            await service.receive(raw)
+            reply = store.pending_deliveries()[0]["content"]
+            assert reply.startswith("[对话 · 排队中]")
+            assert "已收到" in reply and "队列已暂停" in reply
+            await service.receive(raw)
+            assert len(store.pending_deliveries()) == 1
+            agent.handle.assert_not_called()
+            store.close()
+            store = Store(tmp_path)
+            service = Service(store, AsyncMock(), {"bot_id": "bot", "user_id": "owner"}, agent)
+            await service.receive(raw)
+            assert len(store.pending_deliveries()) == 1
+            await service.receive(incoming(2, ""))
+            assert len(store.pending_deliveries()) == 1
+            await service.receive(incoming(3, "帮助"))
+            assert len(store.pending_deliveries()) == 2
+            assert store.pending_deliveries()[-1]["content"].startswith("[系统]")
+        finally:
+            store.close()
+    asyncio.run(scenario())
+
+
+def test_processing_notice_precedes_attachment_and_model_wait(tmp_path):
+    async def scenario():
+        store = Store(tmp_path)
+        agent = AsyncMock()
+        agent.model = "test-model"
+        service = Service(store, AsyncMock(), {"bot_id": "bot", "user_id": "owner"}, agent)
+        user = store.user("bot", "owner")
+        task = store.create_task(user, "Report")
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def download(*args):
+            entered.set()
+            await release.wait()
+
+        service.download_attachments = download
+        worker = None
+        try:
+            await service.receive(incoming(1, f"继续任务 {task['number']}"))
+            assert store.pending_deliveries() == []
+            worker = asyncio.create_task(service.process_user(user))
+            await asyncio.wait_for(entered.wait(), 1)
+            assert store.pending_deliveries()[-1]["content"] == f"[任务 {task['number']} · 处理中]\n收到请求，开始处理。"
+            agent.handle.assert_not_called()
+            release.set()
+            await worker
+            agent.handle.assert_awaited_once()
+        finally:
+            if worker:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+            store.close()
+    asyncio.run(scenario())
+
+
+def test_only_waiting_requests_receive_queue_notice(tmp_path):
+    async def scenario():
+        store = Store(tmp_path)
+        agent = AsyncMock()
+        agent.model = "test-model"
+        service = Service(store, AsyncMock(), {"bot_id": "bot", "user_id": "owner"}, agent)
+        user = store.user("bot", "owner")
+        other = store.user("bot", "other")
+        store.ingest(other, "other-work", "work", {})
+        try:
+            await service.receive(incoming(1, "first"))
+            assert store.pending_deliveries() == []
+            await service.receive(incoming(2, "second"))
+            assert len(store.pending_deliveries()) == 1
+            assert "排队中" in store.pending_deliveries()[0]["content"]
+            await service.receive(incoming(2, "second"))
+            assert len(store.pending_deliveries()) == 1
+            task = store.create_task(user, "Report")
+            await service.receive(incoming(3, f"继续任务 {task['number']}"))
+            assert store.pending_deliveries()[-1]["content"].startswith(f"[任务 {task['number']} · 排队中]")
+            await service.process_user(user)
+            assert agent.handle.await_count == 3
+            service.running[user] = {"message_id": 999}
+            await service.receive(incoming(4, "while busy"))
+            assert "排队中" in store.pending_deliveries()[-1]["content"]
+        finally:
+            store.close()
+    asyncio.run(scenario())
+
+
+def test_task_list_and_confirmation_share_status_labels(tmp_path):
+    async def scenario():
+        store = Store(tmp_path)
+        service = Service(store, AsyncMock(), {"bot_id": "bot", "user_id": "owner"}, AsyncMock())
+        user = store.user("bot", "owner")
+        task = store.create_task(user, "Report")
+        message = store.ingest(user, "work", "work", {})
+        store.bind_task(user, message, task["id"])
+        store.mark_message(message, "processing")
+        question = asyncio.create_task(service.ask(user, message, "Proceed?", approval=True))
+        try:
+            await asyncio.sleep(0)
+            assert store.pending_deliveries()[0]["content"].startswith(f"[任务 {task['number']} · 等待确认]\n")
+            await service.receive(incoming(2, "任务"))
+            assert f"[任务 {task['number']} · 等待确认] Report" in store.pending_deliveries()[-1]["content"]
+            number = service.confirmations[user]["number"]
+            assert f"[确认 {number} · 等待确认] Proceed?" in store.pending_deliveries()[0]["content"]
+            await service.receive(incoming(3, f"同意 {number}"))
+            assert f"[确认 {number} · 已同意]" in store.pending_deliveries()[-1]["content"]
+            assert await question == "YES"
+            assert service.task_status(user, task) == "处理中"
+            store.mark_message(message, "done")
+            await service.receive(incoming(4, f"任务 {task['number']}"))
+            assert f"[任务 {task['number']} · 已完成] Report" in store.pending_deliveries()[-1]["content"]
+            store.mark_message(message, "interrupted")
+            assert service.task_status(user, task) == "已停止"
+        finally:
+            question.cancel()
+            await asyncio.gather(question, return_exceptions=True)
+            store.close()
+    asyncio.run(scenario())
+
+
 def test_copilot_failures_request_administrator_without_leaking_details(tmp_path):
     async def scenario():
         store = Store(tmp_path)
@@ -24,8 +176,8 @@ def test_copilot_failures_request_administrator_without_leaking_details(tmp_path
             await service.process_user(user)
             await service.receive(incoming(2, "模型"))
             replies = [item["content"] for item in store.pending_deliveries()]
-            assert len(replies) == 2
-            assert all("请联系管理员" in reply and "GitHub Token" in reply for reply in replies)
+            assert len(replies) == 3
+            assert all("请联系管理员" in reply and "GitHub Token" in reply for reply in replies[-2:])
             assert all("synthetic-secret" not in reply for reply in replies)
         finally:
             store.close()
@@ -61,10 +213,10 @@ def test_file_listing_format_size_and_local_time():
     timestamp = "2026-09-10 01:02:03"
     local_time = datetime.fromisoformat(timestamp).replace(tzinfo=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
     item = {"number": 5, "source": "original", "name": "report.pdf", "size_bytes": 1536, "created_at": timestamp}
-    assert file_listing_entry(item) == f"5 [收到，1.5 KiB，{local_time}] report.pdf"
+    assert file_listing_entry(item) == f"[文件 5 · 收到，1.5 KiB，{local_time}] report.pdf"
     for size, expected in ((0, "0 B"), (1023, "1023 B"), (1024, "1.0 KiB"), (1048576, "1.0 MiB"), (None, "大小未知")):
         assert f"，{expected}，" in file_listing_entry({**item, "size_bytes": size})
-    assert file_listing_entry({**item, "source": "outbound", "size_bytes": None, "created_at": None}) == "5 [生成，大小未知，时间未知] report.pdf"
+    assert file_listing_entry({**item, "source": "outbound", "size_bytes": None, "created_at": None}) == "[文件 5 · 生成，大小未知，时间未知] report.pdf"
 
 
 def test_task_and_file_commands_are_owned_and_continuation_is_durable(tmp_path):
@@ -87,7 +239,7 @@ def test_task_and_file_commands_are_owned_and_continuation_is_durable(tmp_path):
             text_replies = "\n".join(item["content"] for item in store.pending_deliveries() if item["kind"] == "text")
             assert "Report" in text_replies
             assert "report.txt" in text_replies
-            assert "[收到，8 B，" in text_replies
+            assert f"[文件 {file_number} · 收到，8 B，" in text_replies
             assert "Private title" not in text_replies
             assert "未找到该任务" in text_replies
             assert len([item for item in store.pending_deliveries() if item["kind"] == "file"]) == 1
@@ -260,7 +412,7 @@ def test_delete_all_requires_owned_confirmation_and_freezes_target_set(tmp_path)
             await service.receive(incoming(2, f"同意 {number}", "other"))
             assert all(path.exists() for path in paths)
             await service.receive(incoming(3, "状态"))
-            assert f"等待删除确认：{number}" in store.pending_deliveries()[-1]["content"]
+            assert f"[确认 {number} · 等待确认] 删除文件" in store.pending_deliveries()[-1]["content"]
             await service.receive(incoming(4, f"同意 {number}"))
             assert all(not path.exists() for path in paths)
             assert foreign.exists() and new_file.exists()
@@ -364,13 +516,13 @@ def test_model_commands_validate_persist_and_keep_numbers_stable(tmp_path):
         other = store.user("bot", "other")
         try:
             await service.receive(incoming(1, "模型"))
-            assert "1 · model-b（当前使用）" in store.pending_deliveries()[-1]["content"]
+            assert "[模型 1 · 当前使用] model-b" in store.pending_deliveries()[-1]["content"]
             await service.receive(incoming(2, "切换模型 2"))
             assert store.setting("model:" + user) == "model-c"
             assert store.setting("model:" + other) == ""
             agent.available_models.return_value = ["model-a", "model-b", "model-c"]
             await service.receive(incoming(3, "模型"))
-            assert "2 · model-c（当前使用）" in store.pending_deliveries()[-1]["content"]
+            assert "[模型 2 · 当前使用] model-c" in store.pending_deliveries()[-1]["content"]
             await service.receive(incoming(4, "切换模型 unavailable"))
             await service.receive(incoming(5, "切换模型 0"))
             assert store.setting("model:" + user) == "model-c"
@@ -443,12 +595,12 @@ def test_model_list_distinguishes_running_model_from_next_selection(tmp_path):
         try:
             service.running[user] = {"model": "model-b"}
             await service.receive(incoming(1, "模型"))
-            assert "model-b（正在使用，后续请求）" in store.pending_deliveries()[-1]["content"]
+            assert "· 正在使用，后续请求] model-b" in store.pending_deliveries()[-1]["content"]
             await service.receive(incoming(2, "切换模型 model-c"))
             await service.receive(incoming(3, "模型"))
             reply = store.pending_deliveries()[-1]["content"]
-            assert "model-b（正在使用）" in reply
-            assert "model-c（后续请求）" in reply
+            assert "[模型 1 · 正在使用] model-b" in reply
+            assert "· 后续请求] model-c" in reply
             agent.available_models.return_value = ["model-c"]
             await service.receive(incoming(4, "模型"))
             assert "正在使用模型：model-b" in store.pending_deliveries()[-1]["content"]

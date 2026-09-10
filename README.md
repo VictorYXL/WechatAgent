@@ -211,6 +211,21 @@ requires a service restart; there is no proactive expiry monitor or external ale
 
 ## Interaction
 
+- Incoming ordinary text queues a receipt marked `[对话 · 排队中]` only when earlier work
+  exists for that user, a worker is active, or the queue is paused. Idle requests skip
+  the queued notice. Explicit task continuation follows the same rule and uses its task number. Processing emits
+  a start notice before attachment downloads or model calls. Repeated delivery of the same
+  incoming message does not repeat its receipt, including across restarts. Commands return
+  their own replies; confirmation answers are not queued as new work. Attachments alone
+  remain silent. These notices use the normal delivery queue, so WeChat context, network
+  availability and earlier failed deliveries can still delay actual arrival.
+- Task text replies use `[任务 n · 状态]` followed by the reply body. Task list entries
+  use `[任务 n · 状态] title` on one line. States include 排队中, 处理中, 等待确认,
+  已完成, 已停止 and 失败; unrecorded historical states show 状态未知. Completed means
+  this processing round finished, not that every future project requirement is complete.
+  Ordinary answers without an assigned task use `[对话 · 状态]`; command replies use
+  `[系统]`. Every chunk of a long reply retains its header. File payloads are unchanged.
+  Progress describes public actions only, never private model reasoning.
 - Images, files, videos, and voice attachments are stored without invoking Copilot.
 - Text invokes the user's Copilot reception session. Simple questions get direct
   answers; the agent can search, create, or continue persistent task sessions.
@@ -269,7 +284,11 @@ namespaces. Old tasks and file deliveries are indexed on upgrade; old tasks with
 execution associations display an unknown historical state, not a fabricated completion
 state. File lists contain retained uploads and explicitly queued output snapshots, not
 every file in the workspace. An older known number can still be queried directly.
-File entries use `number [source, size, time] name`, with Chinese source labels in WeChat.
+Numbered entries use `[type number · brief information] content`: file entries are
+`[文件 number · source, size, time] name`, model entries are `[模型 number · state] model ID`,
+and confirmations are `[确认 number · state] question/result`. Deletion previews label
+each file as 待删除. Existing numeric namespaces and command syntax are unchanged;
+system messages without their own IDs retain `[系统]` rather than inventing numbers.
 Sizes come from retained originals or output snapshots, not editable working copies.
 Received time is the locally recorded incoming-message time; generated time is the first
 output snapshot registration time, not the source file's filesystem creation time. Times

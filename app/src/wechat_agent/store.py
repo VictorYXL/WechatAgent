@@ -271,6 +271,12 @@ class Store:
 
     def task_state(self, user_id: str, task_id: str) -> str:
         self.get_task(user_id, task_id)
+        waiting = self.db.execute("SELECT 1 FROM confirmations JOIN message_tasks USING(message_id) "
+                                  "JOIN messages ON messages.id=message_tasks.message_id "
+                                  "WHERE task_id=? AND confirmations.user_id=? AND confirmations.status='pending' "
+                                  "AND messages.status='processing' LIMIT 1", (task_id, user_id)).fetchone()
+        if waiting:
+            return "waiting"
         rows = self.db.execute("SELECT status FROM messages JOIN message_tasks ON messages.id=message_tasks.message_id "
                                "WHERE task_id=? AND user_id=? ORDER BY messages.id DESC", (task_id, user_id)).fetchall()
         if any(row[0] == "processing" for row in rows):
@@ -368,6 +374,15 @@ class Store:
                                     "AND content=? AND status IN ('pending','waiting_context','failed')", (user_id, relative))
             deleted.append(record["number"])
         return {"deleted": deleted, "failed": failed}
+
+    def enqueue_text(self, user_id: str, message_id: int | None, content: str, *, state: str | None = None) -> str:
+        task = self.task_for_message(user_id, message_id) if state and message_id is not None else None
+        heading = f"[任务 {task['number']} · {state}]" if task else f"[对话 · {state}]" if state else "[系统]"
+        prefix = heading + "\n"
+        size = 3000 - len(prefix)
+        identifiers = [self.enqueue(user_id, message_id, "text", prefix + content[offset:offset + size])
+                       for offset in range(0, max(1, len(content)), size)]
+        return identifiers[0]
 
     def enqueue(self, user_id: str, message_id: int | None, kind: str, content: str, *, register: bool = True) -> str:
         if kind == "text" and len(content) > 3000:
