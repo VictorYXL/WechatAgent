@@ -86,7 +86,8 @@ def test_environment_detection_does_not_claim_execution_or_accounts():
     assert all(item["installed"] for item in result["packages"].values())
     assert "account authorization" in result["not_checked"]
     assert result["office_license_required"] is False
-    assert not result["calendar_integration"] and not result["browser_integration"]
+    assert not result["calendar_integration"] and result["browser_integration"]
+    assert result["browser_available"] == bool(result["installed_programs"]["chrome"])
 
 
 @pytest.mark.parametrize("failure", [TimeoutError, asyncio.CancelledError])

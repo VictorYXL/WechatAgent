@@ -247,7 +247,61 @@ non-global DNS answers, pins the selected public IP with the original TLS hostna
 environment proxies and does not send login cookies. This policy applies to this fetch tool,
 not all possible shell traffic. Some sites/providers may block requests or require a browser.
 Retrieved working copies remain workspace files; library deletion is not a workspace wipe.
-Browser interaction, calendar integration, scheduling and messaging other contacts are deferred.
+Calendar integration, scheduling and messaging other contacts are deferred.
+
+## Installed Browser and Programs
+
+The worker's `browser` tool controls an already installed Chrome (or PATH-visible Chromium)
+using Playwright. Installing this project installs the control library, not another browser.
+Windows discovery checks the standard machine/user Chrome installation directories; Linux
+checks `google-chrome`, `google-chrome-stable`, `chrome`, `chromium` and `chromium-browser`
+on PATH. macOS also checks the standard Chrome application location. Missing software is
+reported rather than automatically installed or silently replaced by another browser engine.
+
+Supported actions are `open`, `read`, `click`, `fill`, `press`, `select`, `back`, `tabs`,
+`select_tab`, `screenshot`, `download` and `close`. `read` returns a bounded accessibility
+snapshot; interactions use an exact accessible label or role/name, not unrestricted JavaScript.
+Screenshots and explicitly saved downloads go into the user's `workspace/browser-output`;
+the agent uses `send_file` to deliver requested artifacts. Downloads are not executed. Files
+larger than 50 MiB are rejected when saved; Chrome can temporarily download a larger file
+before that check, so this is not a hard network/disk quota. No upload tool is provided.
+
+Each user has a separate persistent `browser-profile` beside their workspace, under the
+gitignored data directory. Cookies/login state persist; tabs and browser processes close
+on task completion, failure or cancellation. Existing everyday Chrome windows and profiles
+are not attached, imported or read. Treat the agent profile as sensitive account data, not
+an output file. The worker is instructed never to inspect it; this remains logical isolation,
+not OS access control against arbitrary shell scripts.
+
+The default is headless. For manual login, request `open` with `visible=true`, then wait
+through `request_confirmation` with `approval=false`. The user types credentials directly
+in that Chrome window on the server desktop, never in WeChat or a tool argument. Visible
+mode requires an interactive desktop; a phone cannot see the server's window without a
+separately configured remote-desktop solution. Close before changing visible mode. Task and
+question timeouts still apply. No calendar/email account is authorized automatically.
+
+Normal browsing, searches and downloads run without extra approval. For consequential
+submissions (publication, messaging, purchases, remote deletion), the worker must set
+`external_action=true` and supply a specific `confirmation_summary`; the tool waits for a
+fresh approval and does not perform the action after rejection. Classification still depends
+on the agent: this is not a universal semantic firewall against a mislabeled click or a site
+that performs side effects on navigation. Password and file-input targets are blocked; dialogs
+are dismissed. Authenticated page contents and screenshots can contain private data and may
+be sent to cloud inference or returned as requested artifacts.
+
+Browser HTTP(S) requests are checked for public DNS addresses, service workers and WebSockets
+are blocked, and direct local-file/internal URLs are not accepted by `open`. Chrome resolves
+DNS independently after checks, so this is not the IP-pinned isolation of `fetch_page` or a
+network sandbox. Some sites, enterprise policies, CAPTCHA and browser version mismatches
+can prevent automation. No stealth or CAPTCHA-bypass features are included.
+
+`check_environment` now reports discovered paths for Chrome, Python, uv, FFmpeg, Tesseract
+and LibreOffice. Reusing installed software does not require reinstalling it per user or an
+Office product key. Shell path checks permit the exact discovered executable when explicitly
+invoked at the beginning of the command; they do not grant general read/write access to its
+installation directory. Other input/output paths remain checked against the user's workspace.
+The list is deliberately small, not permission to execute any unknown host program. Existing
+shell limitations still apply; administrator permissions are not granted.
 
 ## Interaction
 
@@ -257,7 +311,7 @@ Browser interaction, calendar integration, scheduling and messaging other contac
   desktop control or a separate messaging integration. File/script work is delegated to
   the task worker rather than rejected merely because the reception agent has no shell.
   Task selection binds the current request immediately, even if the reception response
-  later fails. Timers, arbitrary WeChat recipients, browser automation, MCP and Skills
+  later fails. Timers, arbitrary WeChat recipients, calendar integration, MCP and Skills
   remain unavailable. Authorization never creates a missing integration or overrides
   workspace restrictions. Prompt guidance improves routing but is not a guarantee of
   model behavior or proof of message delivery.

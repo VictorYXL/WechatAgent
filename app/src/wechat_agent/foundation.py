@@ -23,6 +23,8 @@ MAX_TEXT = 200_000
 
 
 def environment_status():
+    from .browser import installed_programs
+    programs = installed_programs()
     packages = {}
     for feature, package in PACKAGES.items():
         try:
@@ -36,7 +38,10 @@ def environment_status():
             "scope": "Service environment only; user project environments may differ. Installation is not a successful workload test.",
             "not_checked": ["network connectivity", "OCR or speech model weights", "GPU", "account authorization"],
             "office_license_required": False,
-            "browser_integration": False, "calendar_integration": False}
+            "installed_programs": programs,
+            "browser_integration": True, "browser_available": bool(programs["chrome"]),
+            "browser_profile": "Separate per-user persistent profile; no everyday Chrome profile access",
+            "calendar_integration": False}
 
 
 def search_files(store, user_id, through_message, query=""):

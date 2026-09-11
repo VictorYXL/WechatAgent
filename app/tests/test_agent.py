@@ -259,6 +259,7 @@ def test_worker_uses_selected_model_and_never_falls_back(tmp_path, available):
                 options = client.resume_session.call_args.kwargs
                 assert CHANNEL_PROMPT in options["system_message"]["content"]
                 assert "get_capabilities" in {tool.name for tool in options["tools"]}
+                assert "browser" in {tool.name for tool in options["tools"]}
                 assert {"search_messages", "search_files", "check_environment", "prepare_file", "read_document", "web_search", "fetch_page"} <= {tool.name for tool in options["tools"]}
                 assert options["mcp_servers"] == {}
                 assert options["enable_skills"] is False
@@ -269,6 +270,62 @@ def test_worker_uses_selected_model_and_never_falls_back(tmp_path, available):
                 client.resume_session.assert_not_called()
                 client.create_session.assert_not_called()
             assert agent.current_model(user) == "selected-model"
+        finally:
+            store.close()
+    asyncio.run(scenario())
+
+
+def test_browser_closed_when_worker_fails_or_is_cancelled(tmp_path, monkeypatch):
+    from wechat_agent import agent as module
+    async def scenario():
+        store = Store(tmp_path)
+        try:
+            user = store.user("bot", "owner")
+            for error in (RuntimeError("failure"), asyncio.CancelledError()):
+                browser = Mock(close=AsyncMock())
+                monkeypatch.setattr(module, "Browser", Mock(return_value=browser))
+                agent = Agent(store, "synthetic")
+                agent.execute_with_browser = AsyncMock(side_effect=error)
+                with pytest.raises(type(error)):
+                    await agent.execute(user, {}, {}, [])
+                browser.close.assert_awaited_once()
+        finally:
+            store.close()
+    asyncio.run(scenario())
+
+
+def test_known_software_execution_does_not_grant_neighbor_file_access(tmp_path, monkeypatch):
+    from wechat_agent import agent as module
+    async def scenario():
+        store = Store(tmp_path / "data")
+        try:
+            user = store.user("bot", "owner")
+            task = store.create_task(user, "Local program")
+            store.ingest(user, "1", "run", {})
+            executable = tmp_path / "tools" / "ffmpeg.exe"
+            monkeypatch.setattr(module, "installed_programs", lambda: {"ffmpeg": str(executable)})
+            agent = Agent(store, "synthetic")
+            client = AsyncMock()
+            client.__aenter__.return_value = client
+            client.list_models.return_value = [SimpleNamespace(id=agent.model)]
+            agent.client = Mock(return_value=client)
+            async def configure(client, owner, session_id, options):
+                permission = options["on_permission_request"]
+                invocation = SimpleNamespace()
+                request = SimpleNamespace(kind="shell", possible_paths=[str(executable)], possible_urls=[],
+                                          full_command_text=f'"{executable}" --version')
+                assert "Approve" in type(await permission(request, invocation)).__name__
+                request.possible_paths.append(str(executable.parent / "private.txt"))
+                assert "Reject" in type(await permission(request, invocation)).__name__
+                request = SimpleNamespace(kind="read", path=str(executable))
+                assert "Reject" in type(await permission(request, invocation)).__name__
+                request = SimpleNamespace(kind="write", file_name=str(executable))
+                assert "Reject" in type(await permission(request, invocation)).__name__
+                session = AsyncMock()
+                session.send_and_wait.return_value = None
+                return session
+            agent.session = configure
+            await agent.execute(user, store.pending(user)[0], task, [])
         finally:
             store.close()
     asyncio.run(scenario())
