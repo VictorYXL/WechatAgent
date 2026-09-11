@@ -44,6 +44,47 @@ def test_capability_tool_is_static_and_read_only():
     asyncio.run(scenario())
 
 
+def test_history_search_is_owned_bounded_and_excludes_future(tmp_path):
+    store = Store(tmp_path)
+    try:
+        user = store.user("bot", "owner")
+        other = store.user("bot", "other")
+        first = store.ingest(user, "1", "100% report", {"secret": "hidden"})
+        store.enqueue_text(user, first, "100% reply")
+        store.ingest(other, "1", "100% private", {})
+        current = store.ingest(user, "2", "find 100%", {})
+        store.ingest(user, "3", "100% future", {})
+        results = store.search_messages(user, current, "100%")
+        assert len(results) == 2
+        assert {row["role"] for row in results} == {"user", "assistant"}
+        assert all(row["id"] == first and "payload" not in row for row in results)
+        assert not store.search_messages(other, current, "reply")
+        assert not store.search_messages(user, current, "_")
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("catalog", ["available", "missing", "failed"])
+def test_environment_tool_reports_model_availability_without_fallback(tmp_path, catalog):
+    async def scenario():
+        store = Store(tmp_path)
+        try:
+            user = store.user("bot", "owner")
+            agent = Agent(store, "synthetic")
+            agent.available_models = AsyncMock(return_value=["chosen"] if catalog == "available" else [])
+            if catalog == "failed":
+                agent.available_models.side_effect = RuntimeError("private diagnostic")
+            tool = next(tool for tool in agent.retrieval_tools(user, 1, "chosen") if tool.name == "check_environment")
+            response = await tool.handler(SimpleNamespace(arguments={}))
+            result = json.loads(response.text_result_for_llm)
+            assert result["model"]["selected"] == "chosen"
+            assert result["model"]["available"] is (None if catalog == "failed" else catalog == "available")
+            assert "private diagnostic" not in response.text_result_for_llm
+        finally:
+            store.close()
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("selection", ["direct", "new", "existing", "foreign", "interrupted"])
 def test_reception_delivery_and_immediate_owned_task_selection(tmp_path, selection):
     async def scenario():
@@ -68,7 +109,8 @@ def test_reception_delivery_and_immediate_owned_task_selection(tmp_path, selecti
                 decision = options["on_permission_request"](SimpleNamespace(kind="shell"), None)
                 assert "Reject" in type(decision).__name__
                 tools = {tool.name: tool for tool in options["tools"]}
-                assert set(tools) == {"find_tasks", "start_task", "continue_task", "get_capabilities"}
+                assert set(tools) == {"find_tasks", "start_task", "continue_task", "get_capabilities",
+                                      "search_messages", "search_files", "check_environment"}
 
                 async def respond(*args, **kwargs):
                     if selection in ("new", "interrupted"):
@@ -217,6 +259,7 @@ def test_worker_uses_selected_model_and_never_falls_back(tmp_path, available):
                 options = client.resume_session.call_args.kwargs
                 assert CHANNEL_PROMPT in options["system_message"]["content"]
                 assert "get_capabilities" in {tool.name for tool in options["tools"]}
+                assert {"search_messages", "search_files", "check_environment", "prepare_file", "read_document", "web_search", "fetch_page"} <= {tool.name for tool in options["tools"]}
                 assert options["mcp_servers"] == {}
                 assert options["enable_skills"] is False
                 assert options["manage_schedule_enabled"] is False

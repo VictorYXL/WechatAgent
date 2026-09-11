@@ -209,16 +209,48 @@ so an in-chat expiry notification cannot be guaranteed. The administrator must m
 the log and scan again through the login launcher when required. Replacing the GitHub token also
 requires a service restart; there is no proactive expiry monitor or external alert channel.
 
+## Foundation Tools
+
+Routine own-history searches, file retrieval, document extraction and public web research
+are auto-approved. No new confirmation layer or administrator access is required. Existing
+credential protection, user ownership checks and confirmation for external side effects
+remain in place; the shell is still not an operating-system sandbox.
+
+| Tool | Availability | Behavior |
+| --- | --- | --- |
+| `search_messages` | Reception and worker | Literal search over earlier own messages and assistant replies; up to 20 excerpts, with delivery state; no raw payloads. |
+| `search_files` | Reception and worker | Search all eligible registered filenames before returning up to 30 matches; excludes deleted files and later requests. Not full-text file indexing. |
+| `check_environment` | Reception and worker | Installed document package versions, PATH tool presence, service Python, and a live selected-model catalog check. No inference or installs. |
+| `prepare_file` | Worker | Retrieve an owned file number as a workspace working copy, preserving an existing copy. |
+| `read_document` | Worker | Extract PDF text, DOCX paragraphs/tables, XLSX cells/formulas and UTF-8 text/HTML. Return up to 12,000 characters per call, with `next_offset`. |
+| `web_search` | Worker | Public search via DDGS, up to five results with source URLs; failure is explicit. No paid search key configured. |
+| `fetch_page` | Worker | Public HTML/plain text, no browser JavaScript/login; maximum 2 MiB response and 16,000 output characters. |
+
+Document extraction runs in a child process with a 45-second timeout and a 50 MiB input
+limit. Expanded Office archives are bounded to 100 MiB; PDF extraction is capped at 200
+pages, spreadsheets at 2,000 rows and 100 columns per sheet, and extracted text at 200,000
+characters. Limits are reported, not treated as complete analysis. This is not OCR,
+speech transcription, formula calculation or layout-preserving conversion. Password-protected
+PDFs need an unlocked working copy. Legacy DOC/XLS and other formats need additional tools.
+
+The installed pypdf, python-docx and openpyxl libraries do not require Microsoft Office
+or a product key. The worker can reuse the reported service Python for document-generation
+scripts, but must install additional dependencies only into user project environments.
+No OCR models, browser binaries, LibreOffice or calendar accounts are installed by this upgrade.
+Presence/version checks do not prove model weights, GPU support, network access or account
+authorization. `get_capabilities` describes the contract; `check_environment` observes current
+availability and reports a failed model check as unknown, never as authorization success.
+
+Search queries go to public providers; do not include credentials or private document contents.
+Search snippets and page text are untrusted data. Fetch validates every redirect, rejects
+non-global DNS answers, pins the selected public IP with the original TLS hostname, disables
+environment proxies and does not send login cookies. This policy applies to this fetch tool,
+not all possible shell traffic. Some sites/providers may block requests or require a browser.
+Retrieved working copies remain workspace files; library deletion is not a workspace wipe.
+Browser interaction, calendar integration, scheduling and messaging other contacts are deferred.
+
 ## Interaction
 
-- `搜索任务 关键词` searches the current user's task titles and saved summaries;
-  `搜索文件 关键词` searches registered filenames, excluding deleted entries. Both
-  commands search all owned records before returning at most 20 matches, so older
-  items can be found even when absent from the recent lists. Queries are literal
-  substrings (not SQL wildcards), limited to 200 characters on one line. These
-  local commands do not invoke Copilot and remain available while the queue is
-  paused. Use the returned numbers with `任务 编号`, `继续任务 编号` or `文件 编号`.
-  File contents and unregistered workspace files are not indexed by this search.
 - Both agent roles can query the read-only `get_capabilities` tool for the application's
   delivery, execution and permission boundaries. Normal text replies are already queued
   to the current WeChat conversation; asking for a message to yourself now does not require
@@ -249,8 +281,9 @@ requires a service restart; there is no proactive expiry monitor or external ale
   answers; the agent can search, create, or continue persistent task sessions.
 - People and projects are mentioned in task titles/summaries, not merged into one
   permanent session per person. Search is currently literal substring search.
-- The reception session has only task-index tools. A separate user-local execution
-  runtime handles files, commands, short progress updates, questions, and outputs.
+- The reception session has task-index, owned retrieval and environment-check tools.
+  A separate user-local execution runtime handles documents, public web research,
+  files, commands, short progress updates, questions, and outputs.
 - Material descriptions and collection instructions are interpreted by Copilot.
   Collection mode is currently conversational, not a separate deterministic state machine.
 - Chinese commands below are handled directly, without invoking Copilot inference.
@@ -374,7 +407,8 @@ checks and access anything the host Windows account can access. The token may be
 in runtime memory. Do not treat the arrangement as safe for untrusted users or documents.
 
 Workspace actions are normally approved. The agent is instructed to seek confirmation
-for external publication, purchases, messages to others, and global installs. Some
+for external publication, purchases and messages to others. Global installs remain
+outside the workspace policy. Some
 network-writing commands also trigger a programmatic confirmation. These are not a
 complete shell/network policy enforcement mechanism. No administrator privileges are granted.
 

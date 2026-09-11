@@ -219,6 +219,19 @@ class Store:
         ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def search_messages(self, user_id: str, through_message: int, query: str = "") -> list[dict]:
+        self.user_root(user_id)
+        query = query[:200]
+        return [dict(row) for row in self.db.execute(
+            "SELECT id,created_at,role,text,status FROM ("
+            "SELECT id,created_at,'user' AS role,substr(text,1,3000) AS text,status,0 AS sequence "
+            "FROM messages WHERE user_id=? AND id<? AND text!='' AND instr(lower(text),lower(?))>0 "
+            "UNION ALL SELECT message_id,created_at,'assistant',substr(content,1,3000),status,rowid "
+            "FROM outbox WHERE user_id=? AND message_id<? AND kind='text' "
+            "AND instr(lower(content),lower(?))>0) ORDER BY id DESC,sequence DESC LIMIT 20",
+            (user_id, through_message, query, user_id, through_message, query),
+        )]
+
     def create_task(self, user_id: str, title: str) -> dict:
         task_id = uuid.uuid4().hex
         with self.db:
@@ -287,15 +300,14 @@ class Store:
         self.db.execute("INSERT OR IGNORE INTO files(user_id,source,path,name) VALUES (?,?,?,?)",
                         (user_id, source, path, safe_filename(name)))
 
-    def list_files(self, user_id: str, query: str = "") -> list[dict]:
-        escaped = query.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+    def list_files(self, user_id: str) -> list[dict]:
         records = [dict(row) for row in self.db.execute(
             "SELECT number,source,name,path,CASE WHEN source='original' THEN "
             "(SELECT MIN(messages.created_at) FROM attachments JOIN messages ON messages.id=attachments.message_id "
             "WHERE attachments.user_id=files.user_id AND attachments.path=files.path) ELSE "
             "(SELECT MIN(created_at) FROM outbox WHERE user_id=files.user_id AND content=files.path AND kind='file') "
             "END AS created_at FROM files WHERE user_id=? AND number NOT IN (SELECT number FROM deleted_files) "
-            "AND name LIKE ? ESCAPE '!' ORDER BY number DESC LIMIT 20", (user_id, f"%{escaped}%"))]
+            "ORDER BY number DESC LIMIT 20", (user_id,))]
         for record in records:
             record["size_bytes"] = None
             try:
