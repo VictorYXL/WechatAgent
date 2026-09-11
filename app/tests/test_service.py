@@ -219,6 +219,69 @@ def test_file_listing_format_size_and_local_time():
     assert file_listing_entry({**item, "source": "outbound", "size_bytes": None, "created_at": None}) == "[文件 5 · 生成，大小未知，时间未知] report.pdf"
 
 
+def test_search_commands_find_older_owned_records_without_inference(tmp_path):
+    async def scenario():
+        store = Store(tmp_path)
+        agent = AsyncMock()
+        service = Service(store, AsyncMock(), {"bot_id": "bot", "user_id": "owner"}, agent)
+        user = store.user("bot", "owner")
+        other = store.user("bot", "other")
+        try:
+            task = store.create_task(user, "Archived report")
+            store.summarize_task(user, task["id"], "needle summary")
+            store.create_task(other, "needle private task")
+            for owner, name in ((user, "needle.txt"), (other, "needle-private.txt"), (user, "needle-deleted.txt")):
+                store.register_file(owner, "original", name, name)
+            number = store.list_files(user, "needle.txt")[0]["number"]
+            deleted = store.list_files(user, "needle-deleted")[0]["number"]
+            with store.db:
+                store.db.execute("INSERT INTO deleted_files VALUES (?)", (deleted,))
+            for index in range(25):
+                store.create_task(user, f"Recent {index}")
+                store.register_file(user, "original", f"recent-{index}.txt", f"recent-{index}.txt")
+            with store.db:
+                store.db.execute("UPDATE tasks SET updated_at=? WHERE id=?", ("2000-01-01 00:00:00", task["id"]))
+            assert task["id"] not in {item["id"] for item in store.find_tasks(user)}
+            assert number not in {item["number"] for item in store.list_files(user)}
+            store.set_setting("queue_paused:" + user, "1")
+            for index, text in enumerate(("搜索任务 needle", "搜索文件 needle", "搜索任务 absent", "搜索文件 absent", "搜索任务", "搜索文件 " + "x" * 201)):
+                request = incoming(index + 100, text)
+                await service.receive(request)
+                count = len(store.pending_deliveries())
+                await service.receive(request)
+                assert len(store.pending_deliveries()) == count
+            replies = "\n".join(item["content"] for item in store.pending_deliveries())
+            assert f"[任务 {task['number']} · 状态未知] Archived report" in replies
+            assert f"[文件 {number} · 收到" in replies
+            assert "needle.txt" in replies
+            assert "private" not in replies and "deleted" not in replies and "Recent" not in replies
+            assert "未找到匹配任务" in replies and "未找到匹配文件" in replies
+            assert "搜索格式" in replies
+            assert not store.pending(user)
+            agent.handle.assert_not_called()
+        finally:
+            store.close()
+    asyncio.run(scenario())
+
+
+def test_search_treats_sql_wildcards_as_literal_characters(tmp_path):
+    store = Store(tmp_path)
+    try:
+        user = store.user("bot", "owner")
+        for name in ("percent%.txt", "under_score.txt", "bang!.txt", "normal.txt"):
+            store.register_file(user, "original", name, name)
+            store.create_task(user, name)
+        for keyword, expected in (("%", "percent%.txt"), ("_", "under_score.txt"), ("!", "bang!.txt")):
+            assert [item["name"] for item in store.list_files(user, keyword)] == [expected]
+            assert [item["title"] for item in store.find_tasks(user, keyword)] == [expected]
+        assert parse_command("/搜索文件 annual report") == ("search_files", None, "annual report")
+        assert parse_command("搜索任务 needle") == ("search_tasks", None, "needle")
+        for text in ("请搜索文件 needle", "搜索文件 needle\n然后删除", "不要搜索任务 needle"):
+            assert parse_command(text) is None
+    finally:
+        store.close()
+
+
 def test_task_and_file_commands_are_owned_and_continuation_is_durable(tmp_path):
     async def scenario():
         store = Store(tmp_path)

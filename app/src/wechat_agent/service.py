@@ -48,6 +48,12 @@ def parse_command(text: str):
     }
     if text in aliases:
         return aliases[text], None, ""
+    search = re.fullmatch(r"/?搜索(任务|文件)(?:[ \t]+([^\r\n]*))?", text)
+    if search:
+        query = (search[2] or "").strip()
+        if not query or len(query) > 200:
+            return "invalid_search", None, ""
+        return ("search_tasks" if search[1] == "任务" else "search_files"), None, query
     deletion = re.fullmatch(r"/?删除\s*\[\s*(\*|[1-9][0-9]{0,8}(?:\s*[,，]\s*[1-9][0-9]{0,8})*)\s*\]", text)
     if deletion:
         if deletion[1] == "*":
@@ -244,11 +250,15 @@ class Service:
                                              "WHERE user_id=? AND status='pending' AND expires_at>datetime('now')", (user_id,)).fetchone()
             if deletion:
                 reply += f"\n[确认 {deletion[0]} · 等待确认] 删除文件"
-        elif action == "tasks":
-            tasks = self.store.find_tasks(user_id)
-            reply = "最近任务（最多 20 项）：\n" + "\n".join(
+        elif action == "invalid_search":
+            reply = "搜索格式：搜索任务 关键词 或 搜索文件 关键词。关键词为 1 至 200 个字符，请用单行发送。"
+        elif action in ("tasks", "search_tasks"):
+            searching = action == "search_tasks"
+            tasks = self.store.find_tasks(user_id, extra if searching else "")
+            heading = "匹配任务（最多 20 项，按标题和摘要搜索）：\n" if searching else "最近任务（最多 20 项）：\n"
+            reply = heading + "\n".join(
                 f"[任务 {task['number']} · {self.task_status(user_id, task)}] {task['title'][:80]}" for task in tasks
-            ) if tasks else "暂无任务记录。"
+            ) if tasks else ("未找到匹配任务，请换个关键词。" if searching else "暂无任务记录。")
             if tasks:
                 reply += "\n发送 任务 编号 查看详情，或 继续任务 编号 追加要求。"
         elif action in ("task", "continue"):
@@ -271,11 +281,13 @@ class Service:
                 reply = (f"[任务 {number} · {self.task_status(user_id, task)}] {task['title'][:120]}"
                          f"\n更新时间（UTC）：{task['updated_at']}\n摘要：{task['summary'][:1600] or '暂无摘要'}"
                          f"\n继续处理：继续任务 {number} 你的要求")
-        elif action == "files":
-            files = self.store.list_files(user_id)
-            reply = "最近文件（最多 20 项，时间为电脑本地时间）：\n" + "\n".join(
+        elif action in ("files", "search_files"):
+            searching = action == "search_files"
+            files = self.store.list_files(user_id, extra if searching else "")
+            heading = "匹配文件（最多 20 项，按文件名搜索，时间为电脑本地时间）：\n" if searching else "最近文件（最多 20 项，时间为电脑本地时间）：\n"
+            reply = heading + "\n".join(
                 file_listing_entry(item) for item in files
-            ) if files else "暂无可取回的文件。"
+            ) if files else ("未找到匹配文件，请换个关键词。" if searching else "暂无可取回的文件。")
             if files:
                 reply += "\n发送 文件 编号 获取文件，或 删除 [编号1, 编号2] 删除文件。"
         elif action == "invalid_delete":
@@ -378,6 +390,7 @@ class Service:
                                  "后续请求已切换，当前执行不受影响，其他用户的设置不变。")
         elif action == "help":
             reply = ("状态：查看当前执行和队列\n任务：列出任务\n任务 编号：查看任务详情\n"
+                     "搜索任务 关键词：按标题和摘要找任务\n搜索文件 关键词：按文件名找文件\n"
                      "文件：列出文件\n文件 编号：获取文件\n继续任务 编号：继续已有任务\n"
                      "删除 [编号1, 编号2]：删除指定文件，需确认\n删除 [*]：清空文件库，需确认\n"
                      "继续任务 编号 你的要求：追加要求\n停止：仅停止当前执行\n"

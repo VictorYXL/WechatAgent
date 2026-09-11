@@ -211,6 +211,14 @@ requires a service restart; there is no proactive expiry monitor or external ale
 
 ## Interaction
 
+- `搜索任务 关键词` searches the current user's task titles and saved summaries;
+  `搜索文件 关键词` searches registered filenames, excluding deleted entries. Both
+  commands search all owned records before returning at most 20 matches, so older
+  items can be found even when absent from the recent lists. Queries are literal
+  substrings (not SQL wildcards), limited to 200 characters on one line. These
+  local commands do not invoke Copilot and remain available while the queue is
+  paused. Use the returned numbers with `任务 编号`, `继续任务 编号` or `文件 编号`.
+  File contents and unregistered workspace files are not indexed by this search.
 - Both agent roles can query the read-only `get_capabilities` tool for the application's
   delivery, execution and permission boundaries. Normal text replies are already queued
   to the current WeChat conversation; asking for a message to yourself now does not require
